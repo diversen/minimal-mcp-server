@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simple-mcp-starlette-server"
+version = "0.1.0"
+description = "A minimal MCP streamable-http server with bearer-token auth."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "starlette>=0.37.2,<1.0.0",
+  "uvicorn>=0.30.0,<1.0.0",
+]
+
+[tool.setuptools]
+py-modules = ["server"]

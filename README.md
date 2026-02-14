@@ -12,11 +12,9 @@ Minimal MCP server in Python 3.11 using Starlette with:
 ## Setup
 
 ```bash
-cd /home/dennis/mcp-server
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+git clone https://github.com/diversen/minimal-mcp-server.git
+cd minimal-mcp-server
+uv sync
 ```
 
 Set environment variables:
@@ -24,14 +22,14 @@ Set environment variables:
 ```bash
 cp .env.example .env
 export MCP_AUTH_TOKEN="your-very-secret-token"
-export HOST="127.0.0.1"
+export HOST="0.0.0.0"
 export PORT="5000"
 ```
 
 ## Run
 
 ```bash
-uvicorn server:app --host "${HOST:-127.0.0.1}" --port "${PORT:-5000}"
+uvicorn server:app --host "${HOST}" --port "${PORT}"
 ```
 
 ## MCP flow example
