@@ -1,7 +1,9 @@
 import json
 import os
+from urllib.parse import urlsplit
 
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
@@ -9,7 +11,12 @@ from starlette.routing import Route
 import tools  # noqa: F401
 from tools.registry import call_tool, list_tools
 
-MCP_PROTOCOL_VERSION = "2025-06-18"
+DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+SUPPORTED_PROTOCOL_VERSIONS = {
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+}
 SERVER_NAME = "simple-mcp-starlette-server"
 SERVER_VERSION = "0.1.0"
 
@@ -33,15 +40,100 @@ def _jsonrpc_result(result: dict, request_id) -> dict:
     }
 
 
+def _allowed_origins() -> set[str]:
+    configured = os.getenv("MCP_ALLOWED_ORIGINS", "")
+    return {origin.strip() for origin in configured.split(",") if origin.strip()}
+
+
+def _protocol_error_response(request_id, detail: str) -> JSONResponse:
+    return JSONResponse(
+        _jsonrpc_error(-32602, "Invalid params", request_id, detail),
+        status_code=400,
+    )
+
+
+def _build_mcp_json_response(payload: dict, protocol_version: str, status_code: int = 200) -> JSONResponse:
+    return JSONResponse(
+        payload,
+        status_code=status_code,
+        headers={"MCP-Protocol-Version": protocol_version},
+    )
+
+
+def _base_url(request: Request) -> str:
+    split = urlsplit(str(request.url))
+    return f"{split.scheme}://{split.netloc}"
+
+
+def _resource_metadata_url(request: Request) -> str:
+    return f"{_base_url(request)}/.well-known/oauth-protected-resource/mcp"
+
+
+def _authorization_servers() -> list[str]:
+    configured = os.getenv("MCP_AUTHORIZATION_SERVERS", "")
+    return [server.strip() for server in configured.split(",") if server.strip()]
+
+
+def _www_authenticate_header(request: Request, error: str | None = None, description: str | None = None) -> str:
+    parts = [
+        'Bearer realm="mcp"',
+        f'resource_metadata="{_resource_metadata_url(request)}"',
+    ]
+    scope = os.getenv("MCP_REQUIRED_SCOPE", "").strip()
+    if scope:
+        parts.append(f'scope="{scope}"')
+    if error:
+        parts.append(f'error="{error}"')
+    if description:
+        parts.append(f'error_description="{description}"')
+    return ", ".join(parts)
+
+
+def _bearer_error(
+    request: Request,
+    detail: str,
+    *,
+    status_code: int = 401,
+    error: str | None = None,
+) -> JSONResponse:
+    headers = {"WWW-Authenticate": _www_authenticate_header(request, error=error, description=detail)}
+    return JSONResponse({"error": detail}, status_code=status_code, headers=headers)
+
+
+def _negotiate_protocol_version(headers: Headers, method: str, params: dict) -> str:
+    header_version = headers.get("mcp-protocol-version")
+    if header_version:
+        if header_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise ValueError(
+                f"Unsupported MCP-Protocol-Version header: {header_version}. "
+                f"Supported versions: {sorted(SUPPORTED_PROTOCOL_VERSIONS)}."
+            )
+        negotiated = header_version
+    else:
+        negotiated = DEFAULT_PROTOCOL_VERSION
+
+    if method == "initialize":
+        requested_version = (params or {}).get("protocolVersion")
+        if requested_version and requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
+            raise ValueError(
+                f"Unsupported initialize protocolVersion: {requested_version}. "
+                f"Supported versions: {sorted(SUPPORTED_PROTOCOL_VERSIONS)}."
+            )
+        if requested_version:
+            negotiated = requested_version
+
+    return negotiated
+
+
 def _tools_list_result() -> dict:
     return {"tools": list_tools()}
 
 
-def _handle_mcp_method(method: str, params: dict, request_id):
+def _handle_mcp_method(method: str, params: dict, request_id, protocol_version: str):
     if method == "initialize":
         return _jsonrpc_result(
             {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "protocolVersion": protocol_version,
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": SERVER_NAME,
@@ -85,15 +177,19 @@ def _is_authorized(request: Request) -> Response | None:
 
     header = request.headers.get("authorization")
     if not header:
-        return _auth_error(401, "Missing Authorization header.")
+        return _bearer_error(request, "Missing Authorization header.", error="invalid_token")
 
     parts = header.split(" ", maxsplit=1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
-        return _auth_error(401, "Expected Authorization: Bearer <token>.")
+        return _bearer_error(
+            request,
+            "Expected Authorization: Bearer <token>.",
+            error="invalid_request",
+        )
 
     incoming_token = parts[1].strip()
     if incoming_token != expected_token:
-        return _auth_error(403, "Forbidden: invalid token.")
+        return _bearer_error(request, "Invalid token.", error="invalid_token")
 
     return None
 
@@ -102,7 +198,28 @@ async def health(_: Request) -> PlainTextResponse:
     return PlainTextResponse("ok")
 
 
+async def oauth_protected_resource_metadata(request: Request) -> JSONResponse:
+    mcp_resource = f"{_base_url(request)}/mcp"
+    payload = {
+        "resource": mcp_resource,
+        "authorization_servers": _authorization_servers(),
+        "bearer_methods_supported": ["header"],
+    }
+    required_scope = os.getenv("MCP_REQUIRED_SCOPE", "").strip()
+    if required_scope:
+        payload["scopes_supported"] = [required_scope]
+    docs_url = os.getenv("MCP_RESOURCE_DOCUMENTATION", "").strip()
+    if docs_url:
+        payload["resource_documentation"] = docs_url
+    return JSONResponse(payload)
+
+
 async def mcp_endpoint(request: Request) -> Response:
+    allowed_origins = _allowed_origins()
+    origin = request.headers.get("origin")
+    if origin and allowed_origins and origin not in allowed_origins:
+        return JSONResponse({"error": f"Forbidden origin: {origin}"}, status_code=403)
+
     auth_response = _is_authorized(request)
     if auth_response is not None:
         return auth_response
@@ -121,6 +238,10 @@ async def mcp_endpoint(request: Request) -> Response:
             status_code=400,
         )
 
+    # JSON-RPC response objects are accepted as input and do not require response bodies.
+    if "method" not in payload and ("result" in payload or "error" in payload):
+        return Response(status_code=202)
+
     jsonrpc = payload.get("jsonrpc")
     method = payload.get("method")
     params = payload.get("params", {})
@@ -129,17 +250,36 @@ async def mcp_endpoint(request: Request) -> Response:
     if jsonrpc != "2.0" or not isinstance(method, str):
         return JSONResponse(_jsonrpc_error(-32600, "Invalid Request", request_id), status_code=400)
 
-    response_payload = _handle_mcp_method(method, params, request_id)
-    if response_payload is None:
-        return Response(status_code=202)
+    try:
+        protocol_version = _negotiate_protocol_version(request.headers, method, params)
+    except ValueError as exc:
+        return _protocol_error_response(request_id, str(exc))
 
-    return JSONResponse(response_payload)
+    # JSON-RPC notifications (no id) should not receive result/error payloads.
+    if request_id is None:
+        return Response(status_code=202, headers={"MCP-Protocol-Version": protocol_version})
+
+    response_payload = _handle_mcp_method(method, params, request_id, protocol_version)
+    if response_payload is None:
+        return Response(status_code=202, headers={"MCP-Protocol-Version": protocol_version})
+
+    return _build_mcp_json_response(response_payload, protocol_version)
 
 
 app = Starlette(
     debug=False,
     routes=[
         Route("/health", health, methods=["GET"]),
+        Route(
+            "/.well-known/oauth-protected-resource",
+            oauth_protected_resource_metadata,
+            methods=["GET"],
+        ),
+        Route(
+            "/.well-known/oauth-protected-resource/mcp",
+            oauth_protected_resource_metadata,
+            methods=["GET"],
+        ),
         Route("/mcp", mcp_endpoint, methods=["POST"]),
     ],
 )
