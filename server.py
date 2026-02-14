@@ -1,25 +1,17 @@
 import json
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
+import tools  # noqa: F401
+from tools.registry import call_tool, list_tools
+
 MCP_PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "simple-mcp-starlette-server"
 SERVER_VERSION = "0.1.0"
-
-TOOL_NAME = "get_locale_date_time"
-
-CITY_TO_TZ = {
-    "new york": "America/New_York",
-    "nyc": "America/New_York",
-    "copenhagen": "Europe/Copenhagen",
-    "cp hagen": "Europe/Copenhagen",
-}
 
 
 def _jsonrpc_error(code: int, message: str, request_id=None, data=None) -> dict:
@@ -41,87 +33,8 @@ def _jsonrpc_result(result: dict, request_id) -> dict:
     }
 
 
-def _resolve_timezone(locale: str) -> str:
-    if not locale or not locale.strip():
-        raise ValueError("`locale` is required.")
-
-    candidate = locale.strip()
-    lowered = candidate.lower()
-
-    if lowered in CITY_TO_TZ:
-        return CITY_TO_TZ[lowered]
-
-    try:
-        ZoneInfo(candidate)
-        return candidate
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(
-            "Unsupported locale/timezone. Try an IANA timezone like "
-            "'America/New_York' or a known alias like 'Copenhagen'."
-        ) from exc
-
-
-def _handle_tool_call(params: dict) -> dict:
-    name = params.get("name")
-    arguments = params.get("arguments") or {}
-
-    if name != TOOL_NAME:
-        raise KeyError(f"Unknown tool: {name}")
-
-    locale = arguments.get("locale")
-    tz_name = _resolve_timezone(locale)
-    now = datetime.now(ZoneInfo(tz_name))
-
-    text = (
-        f"Local date/time in {tz_name} is "
-        f"{now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}."
-    )
-
-    return {
-        "content": [
-            {
-                "type": "text",
-                "text": text,
-            }
-        ],
-        "structuredContent": {
-            "locale": locale,
-            "timezone": tz_name,
-            "date": now.strftime("%Y-%m-%d"),
-            "time": now.strftime("%H:%M:%S"),
-            "iso": now.isoformat(),
-            "offset": now.strftime("%z"),
-        },
-        "isError": False,
-    }
-
-
 def _tools_list_result() -> dict:
-    return {
-        "tools": [
-            {
-                "name": TOOL_NAME,
-                "description": (
-                    "Get the local date/time for a locale. "
-                    "Use an IANA timezone or known city alias."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "locale": {
-                            "type": "string",
-                            "description": (
-                                "Timezone/locale like 'America/New_York', "
-                                "'Europe/Copenhagen', 'New York', or 'Copenhagen'."
-                            ),
-                        }
-                    },
-                    "required": ["locale"],
-                    "additionalProperties": False,
-                },
-            }
-        ]
-    }
+    return {"tools": list_tools()}
 
 
 def _handle_mcp_method(method: str, params: dict, request_id):
@@ -146,7 +59,9 @@ def _handle_mcp_method(method: str, params: dict, request_id):
 
     if method == "tools/call":
         try:
-            result = _handle_tool_call(params or {})
+            name = (params or {}).get("name")
+            arguments = (params or {}).get("arguments")
+            result = call_tool(name, arguments)
             return _jsonrpc_result(result, request_id)
         except KeyError as exc:
             return _jsonrpc_error(-32601, str(exc), request_id)
@@ -228,4 +143,3 @@ app = Starlette(
         Route("/mcp", mcp_endpoint, methods=["POST"]),
     ],
 )
-

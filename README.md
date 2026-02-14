@@ -29,7 +29,13 @@ export PORT="5000"
 ## Run
 
 ```bash
-uvicorn server:app --host "${HOST}" --port "${PORT}"
+uv run uvicorn server:app --host "${HOST}" --port "${PORT}"
+```
+
+For development (auto-reload on `.py` changes):
+
+```bash
+uv run uvicorn server:app --host "${HOST}" --port "${PORT}" --reload
 ```
 
 ## MCP flow example
@@ -88,3 +94,40 @@ curl -s -X POST "http://127.0.0.1:5000/mcp" \
 
 - Use `POST /mcp` for streamable-http requests.
 - This starter intentionally keeps scope small (`tools` only).
+
+## Adding new tools
+
+Tools are split into modules under `tools/` and registered with `@register_tool(...)`.
+
+1. Create a new file under `tools/` (example: `tools/echo.py`).
+2. Define `name`, `description`, and `input_schema`.
+3. Return MCP tool output with `content` and optional `structuredContent`.
+4. Import the module in `tools/__init__.py` so registration runs at startup.
+
+Example:
+
+```python
+from typing import Any
+
+from tools.registry import register_tool
+
+@register_tool(
+    name="echo",
+    description="Echo a string.",
+    input_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+)
+def echo(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = arguments["text"]
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": {"text": text},
+        "isError": False,
+    }
+```
+
+No changes are needed in `server.py` when adding tools through this registry flow.
