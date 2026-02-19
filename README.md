@@ -3,7 +3,9 @@
 Minimal MCP server in Python 3.11 using Starlette with:
 - `streamable-http` transport (`POST /mcp`)
 - Bearer token authentication (`Authorization: Bearer <token>`) with OAuth-style challenge metadata
-- One tool: `get_locale_date_time`
+- Tools:
+  - `get_locale_date_time`
+  - `get_wikipedia_pages_json`
 
 ## Requirements
 
@@ -94,6 +96,23 @@ curl -s -X POST "http://127.0.0.1:5000/mcp" \
     "params":{
       "name":"get_locale_date_time",
       "arguments":{"locale":"Copenhagen"}
+    }
+  }'
+```
+
+Wikipedia pages JSON (returns only `query.pages` in `structuredContent`):
+
+```bash
+curl -s -X POST "http://127.0.0.1:5000/mcp" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-very-secret-token" \
+  -d '{
+    "jsonrpc":"2.0",
+    "id":4,
+    "method":"tools/call",
+    "params":{
+      "name":"get_wikipedia_pages_json",
+      "arguments":{"title":"Earth","language":"en"}
     }
   }'
 ```
